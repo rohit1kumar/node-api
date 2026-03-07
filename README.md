@@ -154,6 +154,26 @@ kubectl get all,ingress,certificate,clusterissuer -n myapp
 kubectl delete -f deploy/
 ```
 
+## Where Are Logs Stored?
+
+Kubernetes captures stdout/stderr from every container automatically.
+
+**View logs via kubectl:**
+
+```bash
+kubectl logs -n myapp -l app.kubernetes.io/name=api -f
+kubectl logs -n myapp -l app.kubernetes.io/name=redis -f
+```
+
+**On the node's filesystem:**
+
+```
+/var/log/pods/myapp_<pod-name>_<pod-uid>/<container-name>/0.log
+/var/log/containers/<pod-name>_<container-name>_<container-id>.log
+```
+
+**Important:** Logs do not survive pod deletion/restart. k3s rotates logs at 10MB by default. For persistent logs, use a log aggregation stack (Loki + Grafana, EFK).
+
 ## Learning Roadmap (Infra & K3s)
 
 ### Phase 1 — Strengthen K3s Fundamentals
