@@ -46,3 +46,25 @@ app.delete('/cache/:key', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => logger.info({ port: PORT }, 'Server started'));
+
+function shutdown(err) {
+  logger.fatal({ err }, 'Fatal error, shutting down');
+
+  // stop accepting new requests
+  server.close(() => {
+    logger.fatal('HTTP server closed');
+    process.exit(1);
+  });
+
+  // force exit if cleanup hangs
+  setTimeout(() => {
+    logger.fatal('Forcefully shutting down');
+    process.exit(1);
+  }, 5000).unref();
+}
+
+process.on('uncaughtException', shutdown);
+
+process.on('unhandledRejection', (reason) => {
+  shutdown(reason);
+});
