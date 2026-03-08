@@ -264,6 +264,25 @@ the cloud controller provisions a real LB and assigns it a public IP automatical
 Alternatively, use [MetalLB](https://metallb.universe.tf/) to get `LoadBalancer` Service support
 on bare metal clusters.
 
+### TLS at the Load Balancer (skipping cert-manager)
+
+When nodes are in a private VPC behind a LB, TLS can be terminated at the LB instead of inside
+the cluster. This removes the need for cert-manager, ClusterIssuer, and the `tls` block in Ingress.
+
+```
+Internet ──HTTPS──► Load Balancer (cert lives here) ──HTTP──► Nodes (private VPC)
+```
+
+The LB decrypts once; internal traffic stays plain HTTP inside the private network.
+Remove the `tls` block and `cert-manager.io/cluster-issuer` annotation from `ingress.yaml` when
+using this pattern.
+
+| | TLS at Load Balancer | TLS at cluster (cert-manager) |
+|---|---|---|
+| Complexity | Lower | Higher |
+| Internal traffic | Plain HTTP (trust your VPC) | Encrypted end-to-end |
+| Best for | Standard prod, VPC-isolated clusters | Zero-trust, regulated environments |
+
 ## Learning Roadmap (Infra & Kubernetes)
 
 ### Phase 1 — Strengthen K3s Fundamentals

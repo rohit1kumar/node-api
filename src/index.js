@@ -45,18 +45,33 @@ app.delete('/cache/:key', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => logger.info({ port: PORT }, 'Server started'));
+const server = app.listen(PORT, () => logger.info({ port: PORT }, 'Server started'));
 
-function shutdown(err) {
-  logger.fatal({ err }, 'Fatal error, shutting down');
+let shuttingDown = false;
 
-  // stop accepting new requests
-  server.close(() => {
-    logger.fatal('HTTP server closed');
-    process.exit(1);
+async function shutdown(err) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  if (err) {
+    logger.fatal({ err }, 'Fatal error, shutting down');
+  } else {
+    logger.info('Shutdown signal received');
+  }
+
+  server.close(async () => {
+    logger.info('HTTP server closed');
+
+    try {
+      await redis.quit();
+      logger.info('Redis connection closed');
+    } catch (e) {
+      logger.error({ err: e }, 'Error closing Redis');
+    }
+
+    process.exit(err ? 1 : 0);
   });
 
-  // force exit if cleanup hangs
   setTimeout(() => {
     logger.fatal('Forcefully shutting down');
     process.exit(1);
@@ -68,3 +83,6 @@ process.on('uncaughtException', shutdown);
 process.on('unhandledRejection', (reason) => {
   shutdown(reason);
 });
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
