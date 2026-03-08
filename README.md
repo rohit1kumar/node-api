@@ -1,8 +1,10 @@
-# Express Redis API — K3s Deployment Guide
+# Express Redis API — Kubernetes Deployment Guide
+
+Tested on **k3s** and **MicroK8s** (v1.32+, which now ships Traefik as the default ingress controller).
 
 ## Prerequisites
 
-- A server with [k3s](https://k3s.io/) installed (comes with Traefik ingress controller)
+- A server with [k3s](https://k3s.io/) or [MicroK8s](https://microk8s.io/) installed
 - `kubectl` configured to talk to your cluster
 - Docker (to build and push the image)
 - A domain with DNS A record pointing to your server's public IP
@@ -27,27 +29,33 @@ docker build -t rohit1kumar/node-redis-api:1.1.1 .
 docker push rohit1kumar/node-redis-api:1.1.1
 ```
 
-## Step 2 — Install cert-manager
+## Step 2 — Enable Cluster Addons
 
-cert-manager handles automatic TLS certificate provisioning from Let's Encrypt.
-
+**MicroK8s:**
 ```bash
-kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+microk8s enable dns
+microk8s enable hostpath-storage   # default StorageClass for the Redis PVC
+microk8s enable ingress            # installs Traefik (v1.32+)
+microk8s enable cert-manager
 ```
 
-Wait for all cert-manager pods to be ready:
-
+**k3s:** Traefik and local-path storage come pre-installed. Install cert-manager manually:
 ```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
 kubectl wait --for=condition=Ready pods --all -n cert-manager --timeout=120s
 ```
 
 ## Step 3 — Deploy Everything
 
+Apply namespace first to avoid a race condition where other resources are created before the namespace exists:
+
 ```bash
-kubectl apply -f deploy/
+kubectl apply -f deploy/namespace.yaml && kubectl apply -f deploy/
 ```
 
-This applies all manifests: namespace, Redis, API, services, ClusterIssuer, and Ingress.
+> `kubectl apply -f deploy/` sends all files to the API server nearly simultaneously. The namespace
+> may not be fully registered before `api.yaml` and `ingress.yaml` are processed, causing
+> `namespaces "myapp" not found` errors. Applying namespace first and re-running is the fix.
 
 ## Step 4 — Verify the Deployment
 
@@ -113,9 +121,21 @@ Tells cert-manager how to get TLS certificates from Let's Encrypt:
 Exposes the API to the public internet:
 
 - Routes traffic from the domain to the API service
-- `ingressClassName: traefik` — tells k3s to use its built-in Traefik ingress controller
+- `ingressClassName: traefik` — works for both k3s and MicroK8s v1.32+
 - `cert-manager.io/cluster-issuer` annotation triggers automatic TLS cert provisioning
 - `tls` block defines the hostname and secret where the certificate is stored
+
+### ClusterIssuer solver field (`cluster-issuer.yaml`)
+
+cert-manager v1.19+ uses `ingressClassName:` inside the HTTP01 solver block. The older `class:` field is deprecated:
+
+```yaml
+solvers:
+  - http01:
+      ingress:
+        ingressClassName: traefik   # correct for cert-manager v1.19+
+        # class: traefik            # deprecated
+```
 
 ## Debugging
 
@@ -174,7 +194,77 @@ kubectl logs -n myapp -l app.kubernetes.io/name=redis -f
 
 **Important:** Logs do not survive pod deletion/restart. k3s rotates logs at 10MB by default. For persistent logs, use a log aggregation stack (Loki + Grafana, EFK).
 
-## Learning Roadmap (Infra & K3s)
+## Cluster Networking Notes
+
+### Cross-node pod communication
+
+Pods on different nodes communicate directly — the control plane is never in the data path.
+When the `api` pod (on the worker node) connects to `redis:6379`, CoreDNS resolves `redis` to
+the ClusterIP Service, and kube-proxy routing rules on every node forward it directly to the
+Redis pod (on the control plane node) via the Calico overlay network.
+
+```
+Worker Node                          Control Plane Node
+api pod ──► kube-proxy ──────────────────────► redis pod
+            (local routing rules,               (via Calico overlay)
+             no hop through CP)
+```
+
+The control plane only handles cluster management (scheduling, API, etcd) — never live app traffic.
+
+### What the control plane actually does vs what Traefik does
+
+- **Traefik** — handles external HTTP/HTTPS traffic, routes by hostname/path to backend services
+- **Control plane** — receives `kubectl` commands, schedules pods, stores cluster state in etcd
+
+Traefik runs as a pod on cluster nodes. The control plane has nothing to do with request routing.
+
+### Traffic flow in this setup
+
+```
+DNS api.roht.me ──► Control Plane public IP
+                         │
+                    Traefik pod (on CP node)
+                         │
+                    api Service (ClusterIP)
+                         │
+                    api pods (on any node, via Calico)
+```
+
+DNS points to the control plane only because that's the node with a public IP — not because the
+control plane is special for routing. Traefik on the worker node could serve traffic equally well.
+
+## Production Load Balancing
+
+In production with multiple nodes, you put a **Load Balancer** in front of all nodes so traffic
+is distributed and no single node is a bottleneck or single point of failure.
+
+```
+DNS api.roht.me ──► Load Balancer (public IP)
+                         │
+              ┌──────────┴──────────┐
+         Node 1 (CP)           Node 2 (Worker)
+         Traefik pod           Traefik pod
+              └──────────┬──────────┘
+                         │
+                   api pods (on any node)
+```
+
+The LB health-checks both nodes and removes unhealthy ones automatically.
+
+**On cloud providers (AWS/GCP/Azure/Hetzner):** Create a `Service` with `type: LoadBalancer` and
+the cloud controller provisions a real LB and assigns it a public IP automatically.
+
+**On bare metal / Hetzner specifically:**
+1. Create a Hetzner Load Balancer from the console
+2. Add both nodes as targets on ports 80 and 443
+3. Worker node does not need a public IP — the LB reaches it via the private network
+4. Point your DNS to the LB's public IP instead of the control plane IP
+
+Alternatively, use [MetalLB](https://metallb.universe.tf/) to get `LoadBalancer` Service support
+on bare metal clusters.
+
+## Learning Roadmap (Infra & Kubernetes)
 
 ### Phase 1 — Strengthen K3s Fundamentals
 - ConfigMaps & Secrets — externalize config, manage sensitive data (avoid hardcoded env vars)
@@ -200,7 +290,8 @@ kubectl logs -n myapp -l app.kubernetes.io/name=redis -f
 
 ### Phase 5 — High Availability & Scaling
 - HorizontalPodAutoscaler (HPA) — auto-scale pods based on CPU/memory/custom metrics
-- Multi-node k3s cluster — add worker nodes, understand node taints and tolerations
+- Multi-node cluster — add worker nodes, understand node taints and tolerations
+- Load Balancer — put LB in front of all nodes (Hetzner LB, MetalLB, or cloud LB Service)
 - etcd backup & restore — disaster recovery for cluster state
 - PodDisruptionBudgets — ensure availability during node maintenance
 
