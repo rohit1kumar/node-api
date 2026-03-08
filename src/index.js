@@ -18,7 +18,7 @@ app.use(express.json());
 app.use(pinoHttp({ logger }));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', build: process.env.BUILD_SHA || 'dev' });
 });
 
 app.post('/cache', async (req, res) => {

@@ -23,7 +23,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t rohit1kumar/node-redis-api:${{ env.SHORT_SHA }} .
+          docker build --build-arg BUILD_SHA=${{ env.SHORT_SHA }} -t rohit1kumar/node-redis-api:${{ env.SHORT_SHA }} .
 
       - name: Push Docker image
         run: |
